@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MZ Sign Language - Clean White UI</title>
+  
+  <!-- MediaPipe Holistic & Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+
+  <style>
+    body { margin: 0; overflow: hidden; background-color: black; font-family: 'Pretendard', sans-serif; }
+    #v_src, #out {
+      position: absolute; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      object-fit: cover; transform: scaleX(-1);
+    }
+    #out { z-index: 2; pointer-events: none; }
+    .darkness {
+      position: absolute; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      background: rgba(10, 5, 0, 0.4); /* 배경을 살짝 더 어둡게 해서 흰색 선을 강조 */
+      mix-blend-mode: multiply; pointer-events: none; z-index: 5;
+    }
+    
+    #text-output {
+      position: absolute; bottom: 10%; left: 50%; transform: translateX(-50%); z-index: 10;
+      color: white; font-size: 3rem; font-weight: bold; background: rgba(0, 0, 0, 0.7);
+      padding: 15px 40px; border-radius: 50px; border: 3px solid #ffffff; 
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5); /* 촌스러운 네온 글로우 대신 모던한 그림자 */
+      transition: all 0.2s ease-in-out; white-space: nowrap;
+    }
+
+    #debug {
+      position: absolute; top: 20px; left: 20px; z-index: 10; color: #ffffff;
+      background: rgba(0,0,0,0.6); padding: 10px 15px; border-radius: 8px; font-weight: bold; line-height: 1.5;
+      border: 1px solid rgba(255,255,255,0.3);
+    }
+  </style>
+</head>
+<body>
+
+  <video id="v_src" autoplay playsinline></video>
+  <canvas id="out"></canvas>
+  <div class="darkness"></div>
+  
+  <div id="debug">Emotion: - <br> Gesture: -</div>
+  <div id="text-output">인식 대기 중...</div>
+
+  <script>
+    const vElement = document.getElementById('v_src');
+    const cElement = document.getElementById('out');
+    const ctx = cElement.getContext('2d');
+    const outputDiv = document.getElementById('text-output');
+    const debugDiv = document.getElementById('debug');
+
+    let lastHandY = 0;
+    let holdUntil = 0; 
+    let currentActionText = "인식 대기 중...";
+    let currentBorderColor = "#ffffff"; // 기본 테두리 색상도 깔끔한 화이트
+
+    // 손가락 펴짐 여부 판별
+    function checkOpen(pts) {
+        let count = 0;
+        const wrist = pts[0];
+        const tips = [8, 12, 16, 20];
+        const pips = [6, 10, 14, 18];
+        for (let i = 0; i < tips.length; i++) {
+            if (Math.hypot(pts[tips[i]].x - wrist.x, pts[tips[i]].y - wrist.y) > 
+                Math.hypot(pts[pips[i]].x - wrist.x, pts[pips[i]].y - wrist.y)) count++;
+        }
+        return count >= 3;
+    }
+
+    function onResults(res) {
+        cElement.width = vElement.videoWidth;
+        cElement.height = vElement.videoHeight;
+        ctx.save();
+        ctx.clearRect(0, 0, cElement.width, cElement.height);
+
+        const now = Date.now();
+        let emotion = "happy"; 
+        let isNearChin = false;
+        let isWaving = false;
+        let browDistText = "0";
+
+        // 1. 얼굴 감정 인식 및 화이트 라인 렌더링
+        if (res.faceLandmarks) {
+            
+            // --- 깔끔한 화이트 라인 설정 ---
+            ctx.shadowBlur = 8; // 은은한 자체 발광
+            ctx.shadowColor = '#ffffff'; 
+            
+            drawConnectors(ctx, res.faceLandmarks, FACEMESH_LIPS, {color: '#ffffff', lineWidth: 2});
+            drawConnectors(ctx, res.faceLandmarks, FACEMESH_LEFT_EYEBROW, {color: '#ffffff', lineWidth: 2});
+            drawConnectors(ctx, res.faceLandmarks, FACEMESH_RIGHT_EYEBROW, {color: '#ffffff', lineWidth: 2});
+            
+            ctx.shadowBlur = 0; // 초기화
+            // --------------------------------
+
+            const leftEyeTop = res.faceLandmarks[159];
+            const rightEyeTop = res.faceLandmarks[386];
+            const leftBrow = res.faceLandmarks[105];
+            const rightBrow = res.faceLandmarks[334];
+            
+            res.chinPos = res.faceLandmarks[152];
+
+            const leftDist = leftEyeTop.y - leftBrow.y;
+            const rightDist = rightEyeTop.y - rightBrow.y;
+            const avgBrowDist = (leftDist + rightDist) / 2;
+            
+            browDistText = avgBrowDist.toFixed(4);
+
+            // [수정 완료] 눈썹 거리가 0.05 아래면 무조건 슬픔(angry)
+            if (avgBrowDist < 0.05) {
+                emotion = "angry"; 
+            } else {
+                emotion = "happy"; 
+            }
+        }
+
+        // 2. 손동작 인식 및 화이트 라인 렌더링
+        const handLandmarks = res.rightHandLandmarks || res.leftHandLandmarks; 
+        if (handLandmarks) {
+            
+            // --- 손도 깔끔한 화이트 라인으로 통일 ---
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = '#ffffff';
+            drawConnectors(ctx, handLandmarks, HAND_CONNECTIONS, {color: '#ffffff', lineWidth: 3});
+            drawLandmarks(ctx, handLandmarks, {color: '#ffffff', lineWidth: 1, radius: 2});
+            ctx.shadowBlur = 0; 
+
+            const isOpen = checkOpen(handLandmarks);
+            const wrist = handLandmarks[0];
+
+            const velocity = Math.abs(wrist.y - lastHandY);
+            lastHandY = wrist.y;
+            if (velocity > 0.015) isWaving = true;
+
+            if (res.chinPos) {
+                const distToChin = Math.hypot(wrist.x - res.chinPos.x, wrist.y - res.chinPos.y);
+                if (distToChin < 0.25) isNearChin = true; 
+            }
+
+            // 3. 타이머 갱신 (텍스트 출력 색상도 채도를 낮춰서 세련되게 조정)
+            if (isOpen && isWaving) {
+                currentActionText = (emotion === "happy") ? "알고있지 😊" : "모르겠어 😢";
+                currentBorderColor = (emotion === "happy") ? "#4ade80" : "#f87171"; // 파스텔톤 그린/레드
+                holdUntil = now + 3000;
+            } else if (!isOpen && isNearChin) {
+                currentActionText = (emotion === "happy") ? "맛있다 😋" : "맛없다 🤢";
+                currentBorderColor = (emotion === "happy") ? "#facc15" : "#fb923c"; // 파스텔톤 옐로우/오렌지
+                holdUntil = now + 3000;
+            }
+            
+            debugDiv.innerHTML = `Emotion: ${emotion.toUpperCase()} (BrowDist: ${browDistText}) <br> Hand: ${isOpen ? 'OPEN' : 'FIST'} | Wave: ${isWaving}`;
+        }
+
+        // 4. UI 렌더링
+        if (now < holdUntil) {
+            outputDiv.innerText = currentActionText;
+            outputDiv.style.borderColor = currentBorderColor;
+            outputDiv.style.color = currentBorderColor;
+        } else {
+            outputDiv.innerText = "인식 대기 중...";
+            outputDiv.style.borderColor = "#ffffff";
+            outputDiv.style.color = "white";
+        }
+
+        ctx.restore();
+    }
+
+    const holistic = new Holistic({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
+    }});
+
+    holistic.setOptions({
+        modelComplexity: 0,
+        smoothLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+    holistic.onResults(onResults);
+
+    const cam = new Camera(vElement, {
+        onFrame: async () => { await holistic.send({ image: vElement }); },
+        width: 640, height: 480
+    });
+    cam.start();
+  </script>
+</body>
+</html>
