@@ -56,10 +56,16 @@
     const outputDiv = document.getElementById('text-output');
     const debugDiv = document.getElementById('debug');
 
+    
     let lastHandY = 0;
     let holdUntil = 0; 
     let currentActionText = "인식 대기 중...";
     let currentBorderColor = "#ffffff"; // 기본 테두리 색상도 깔끔한 화이트
+
+    // VARCO Voice TTS 재생 관리 변수
+    let lastSpokenText = "";
+    let lastSpeakTime = 0;
+    let currentAudio = null;
 
     // 사용자별 얼굴 기준값 보정용 변수
     let baselineBrowDist = null; // 눈썹 기준 거리
@@ -68,7 +74,7 @@
     let calibrationStart = Date.now(); // 보정 시작 시간
 
     const CALIBRATION_TIME = 3000; // 처음 3초동안 평소 표정 측정
-    const ANGRY_RATIO = 0.95; // 기준값보다 7% 이상 줄면 angry
+    const ANGRY_RATIO = 0.90; // 기준값보다 10% 이상 줄면 angry
 
     // 눈 커짐 + 격한 끄덕임 감지용 변수
     let baselineEyeOpen = null // 평소 눈 크기 기준값
@@ -91,6 +97,96 @@
                 Math.hypot(pts[pips[i]].x - wrist.x, pts[pips[i]].y - wrist.y)) count++;
         }
         return count >= 3;
+    }
+
+    // -------------------------------
+    // 이모지 제거 함수
+    // -------------------------------
+    // 화면에는 이모지를 보여주지만,
+    // TTS에는 이모지를 제외한 순수 문장만 전달하기 위해 사용
+    function removeEmoji(text) {
+        return text.replace(/[^\p{L}\p{N}\p{P}\p{Z}]/gu, "").trim();
+    }
+
+    // -------------------------------
+    // VARCO Voice TTS 호출 및 재생 함수
+    // -------------------------------
+    // 인식된 문장을 서버로 보내고,
+    // 서버가 VARCO Voice API에서 받아온 음성 데이터를 재생한다.
+    async function speakWithVarco(text) {
+        const now = Date.now();
+
+        // 같은 문장이 짧은 시간 안에 반복해서 재생되는 것을 방지
+        // 카메라 인식 함수는 매 프레임 실행되기 때문에 중복 호출 방지가 필요함
+        if (text === lastSpokenText && now - lastSpeakTime < 3000) {
+            return;
+        }
+
+        // 현재 음성 출력 정보를 저장
+        lastSpokenText = text;
+        lastSpeakTime = now;
+
+        try {
+            // 로컬 서버에 TTS 요청
+            // API Key는 브라우저가 아니라 서버 쪽에서 관리함
+            const response = await fetch("http://localhost:3000/api/tts", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    text: removeEmoji(text), // 이모지를 제거한 문장만 음성 합성에 사용
+                    voice: "멀더",
+                    speed: 1,
+                    pitch: 1,
+                }),
+            });
+
+            // 서버 또는 VARCO API 호출 실패 처리
+            if (!response.ok) {
+                console.error("TTS 서버 오류:", await response.text());
+                return;
+            }
+
+            // 서버에서 반환한 음성 데이터 수신
+            const data = await response.json();
+
+            // audio 데이터가 없는 경우 예외 처리
+            if (!data.audio) {
+                console.error("TTS 응답에 audio가 없습니다.");
+                return;
+            }
+
+            // base64 형식의 음성 데이터를 브라우저에서 재생 가능한 wav 주소로 변환
+            const audioSrc = "data:audio/wav;base64," + data.audio;
+
+            // 이전 음성이 재생 중이면 중지
+            // 새 문장이 들어왔을 때 음성이 겹치는 것을 방지
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+            }
+
+            // 새 오디오 객체를 생성하고 음성 재생
+            currentAudio = new Audio(audioSrc);
+            currentAudio.play();
+
+        } catch (error) {
+            // 네트워크 오류 또는 예외 상황 처리
+            console.error("TTS 호출 실패:", error);
+        }
+    }
+
+    // -------------------------------
+    // 인식 결과 반영 함수
+    // -------------------------------
+    // 화면에 출력할 문장과 색상을 바꾸고,
+    // 같은 문장을 VARCO Voice로 음성 출력한다.
+    function setAction(text, color) {
+        currentActionText = text;
+        currentBorderColor = color;
+        holdUntil = Date.now() + 3000;
+        speakWithVarco(text);
     }
 
     function onResults(res) {
@@ -239,43 +335,34 @@
                 if (distToChin < 0.25) isNearChin = true; 
             }
 
-            // 3. 타이머 갱신 (텍스트 출력 색상도 채도를 낮춰서 세련되게 조정)
+            // 3. 타이머 갱신 + TTS 재생
             if (isOpen && isWaving) {
                 // 손바닥 흔들기 + 눈 커짐 + 격한 끄덕임
                 if (isEyesWide && isStrongNod) {
-                    currentActionText = "아~ 당연히 알지 😎";
-                    currentBorderColor = "#38bdf8"; // 라이트 스카이 블루
+                    setAction("아~ 당연히 알지 😎", "#38bdf8");
                 }
                 // 손바닥 흔들기 + 웃는 얼굴
                 else if (emotion === "happy") {
-                    currentActionText = "알고있지 😊";
-                    currentBorderColor = "#4ade80"; // 파스텔톤 그린
+                    setAction("알고있지 😊", "#4ade80");
                 }
                 // 손바닥 흔들기 + 화난 얼굴
                 else if (emotion === "angry") {
-                    currentActionText = "모르겠어 😢";
-                    currentBorderColor = "#f87171"; // 레드
+                    setAction("모르겠어 😢", "#f87171");
                 }
-             
-                holdUntil = now + 3000;
 
             } else if (!isOpen && isNearChin) {
                 // 주먹으로 턱 쓸어올림 + 눈 커짐 + 격한 끄덕임
                 if (isEyesWide && isStrongNod) {
-                    currentActionText = "와 개꿀맛 😜";
-                    currentBorderColor = "#f97316"; // 비비드 오렌지
+                    setAction("와 개꿀맛 😜", "#f97316");
                 }
                 // 주먹으로 턱 쓸어올림 + 웃는 얼굴
                 else if (emotion === "happy") {
-                    currentActionText = "맛있다 😋";
-                    currentBorderColor = "#facc15"; // 파스텔톤 옐로우
+                    setAction("맛있다 😋", "#facc15");
                 }    
+                // 주먹으로 턱 쓸어올림 + 화난 얼굴
                 else if (emotion === "angry") {
-                    currentActionText = "맛없다 🤢";
-                    currentBorderColor = "#fb923c"; // 파스텔톤 오렌지
+                    setAction("맛없다 🤢", "#fb923c");
                 }
-
-                holdUntil = now + 3000;
             }
             
             debugDiv.innerHTML = `
