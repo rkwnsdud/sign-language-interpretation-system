@@ -61,6 +61,25 @@
     let currentActionText = "인식 대기 중...";
     let currentBorderColor = "#ffffff"; // 기본 테두리 색상도 깔끔한 화이트
 
+    // 사용자별 얼굴 기준값 보정용 변수
+    let baselineBrowDist = null; // 눈썹 기준 거리
+    let calibrationValues = []; // 보정 데이터 저장소
+    let isCalibrating = true; // 보정 진행 여부 플래그
+    let calibrationStart = Date.now(); // 보정 시작 시간
+
+    const CALIBRATION_TIME = 3000; // 처음 3초동안 평소 표정 측정
+    const ANGRY_RATIO = 0.95; // 기준값보다 7% 이상 줄면 angry
+
+    // 눈 커짐 + 격한 끄덕임 감지용 변수
+    let baselineEyeOpen = null // 평소 눈 크기 기준값
+    let eyeOpenValues = [];
+    let lastNoseY = 0; // 이전 프레임 코 위치
+    let nodPower = 0; // 끄덕임 강도 누적값
+
+    const EYE_WIDE_RATIO = 1.25; // 평소보다 눈이 25% 이상 커지면 눈 커짐
+    const NOD_VELOCITY_LIMIT = 0.012 // 코의 y좌표 변화가 0.012 이상이면 끄덕임으로 판단
+    const NOD_POWER_LIMIT = 0.035 // 누적 끄덕임 강도 기준
+
     // 손가락 펴짐 여부 판별
     function checkOpen(pts) {
         let count = 0;
@@ -84,7 +103,11 @@
         let emotion = "happy"; 
         let isNearChin = false;
         let isWaving = false;
+        let isEyesWide = false;
+        let isStrongNod = false;
+
         let browDistText = "0";
+        let eyeOpenText = "0";
 
         // 1. 얼굴 감정 인식 및 화이트 라인 렌더링
         if (res.faceLandmarks) {
@@ -113,11 +136,83 @@
             
             browDistText = avgBrowDist.toFixed(4);
 
-            // [수정 완료] 눈썹 거리가 0.05 아래면 무조건 슬픔(angry)
-            if (avgBrowDist < 0.05) {
-                emotion = "angry"; 
+            // --------------------------------
+            // 눈 커짐 감지
+            // --------------------------------
+            // 왼쪽 눈: 위 159, 아래 145
+            // 오른쪽 눈: 위 386, 아래 374
+            const leftEyeBottom = res.faceLandmarks[145];
+            const rightEyeBottom = res.faceLandmarks[374];
+
+            // 얼굴 크기 차이를 줄이기 위해 양쪽 눈 바깣 거리로 정규화
+            const leftFaceSide = res.faceLandmarks[234];
+            const rightFaceSide = res.faceLandmarks[454];
+            const faceWidth = Math.hypot(
+                rightFaceSide.x - leftFaceSide.x,
+                rightFaceSide.y - leftFaceSide.y
+            );
+
+            const leftEyeOpen = Math.abs(leftEyeBottom.y - leftEyeTop.y);
+            const rightEyeOpen = Math.abs(rightEyeBottom.y - rightEyeTop.y);
+            const avgEyeOpen = ((leftEyeOpen + rightEyeOpen) / 2) / faceWidth;
+
+            eyeOpenText = avgEyeOpen.toFixed(4);
+
+            // --------------------------------
+            // 격한 끄덕임 감지
+            // --------------------------------
+            // 코 끝 위칭를 이요해서 위아래 움직임 감지
+            const nose = res.faceLandmarks[1];
+
+            if (lastNoseY !== 0) {
+                const noseVelocity = Math.abs(nose.y - lastNoseY);
+
+                if (noseVelocity > NOD_VELOCITY_LIMIT) {
+                    nodPower += noseVelocity;
+                } else {
+                    // 움직임이 약해지면 누적값 서서히 감소
+                    nodPower *= 0.85;
+                }
+            }
+
+            lastNoseY = nose.y;
+
+            if (nodPower > NOD_POWER_LIMIT) {
+                isStrongNod = true;
+                nodPower *= 0.6;
+            }
+
+            // 사용자별 기준값 자동 보정
+            if (isCalibrating) {
+                // 처음 3초동안 평소 표정의 눈썹 거리 값을 계속 모음
+                calibrationValues.push(avgBrowDist);
+                eyeOpenValues.push(avgEyeOpen);
+
+                // 3초가 지나면 평균값을 사용자 기준값으로 저장
+                if (now - calibrationStart > CALIBRATION_TIME) {
+                    baselineBrowDist =
+                        calibrationValues.reduce((sum, value) => sum + value, 0) / calibrationValues.length;
+
+                    baselineEyeOpen =
+                        eyeOpenValues.reduce((sum, value) => sum + value, 0) / eyeOpenValues.length;
+
+                    isCalibrating = false;
+                }
+
+                emotion = "calibrating";
             } else {
-                emotion = "happy"; 
+                // 화난 얼굴 판단
+                if (avgBrowDist < baselineBrowDist * ANGRY_RATIO) {
+                        emotion = "angry";
+                } else {
+                    emotion = "happy";
+                }
+
+                // 눈 커짐 판단
+                if (avgEyeOpen > baselineEyeOpen * EYE_WIDE_RATIO) {
+                    isEyesWide = true;
+                }
+
             }
         }
 
@@ -146,20 +241,63 @@
 
             // 3. 타이머 갱신 (텍스트 출력 색상도 채도를 낮춰서 세련되게 조정)
             if (isOpen && isWaving) {
-                currentActionText = (emotion === "happy") ? "알고있지 😊" : "모르겠어 😢";
-                currentBorderColor = (emotion === "happy") ? "#4ade80" : "#f87171"; // 파스텔톤 그린/레드
+                // 손바닥 흔들기 + 눈 커짐 + 격한 끄덕임
+                if (isEyesWide && isStrongNod) {
+                    currentActionText = "아~ 당연히 알지 😎";
+                    currentBorderColor = "#38bdf8"; // 라이트 스카이 블루
+                }
+                // 손바닥 흔들기 + 웃는 얼굴
+                else if (emotion === "happy") {
+                    currentActionText = "알고있지 😊";
+                    currentBorderColor = "#4ade80"; // 파스텔톤 그린
+                }
+                // 손바닥 흔들기 + 화난 얼굴
+                else if (emotion === "angry") {
+                    currentActionText = "모르겠어 😢";
+                    currentBorderColor = "#f87171"; // 레드
+                }
+             
                 holdUntil = now + 3000;
+
             } else if (!isOpen && isNearChin) {
-                currentActionText = (emotion === "happy") ? "맛있다 😋" : "맛없다 🤢";
-                currentBorderColor = (emotion === "happy") ? "#facc15" : "#fb923c"; // 파스텔톤 옐로우/오렌지
+                // 주먹으로 턱 쓸어올림 + 눈 커짐 + 격한 끄덕임
+                if (isEyesWide && isStrongNod) {
+                    currentActionText = "와 개꿀맛 😜";
+                    currentBorderColor = "#f97316"; // 비비드 오렌지
+                }
+                // 주먹으로 턱 쓸어올림 + 웃는 얼굴
+                else if (emotion === "happy") {
+                    currentActionText = "맛있다 😋";
+                    currentBorderColor = "#facc15"; // 파스텔톤 옐로우
+                }    
+                else if (emotion === "angry") {
+                    currentActionText = "맛없다 🤢";
+                    currentBorderColor = "#fb923c"; // 파스텔톤 오렌지
+                }
+
                 holdUntil = now + 3000;
             }
             
-            debugDiv.innerHTML = `Emotion: ${emotion.toUpperCase()} (BrowDist: ${browDistText}) <br> Hand: ${isOpen ? 'OPEN' : 'FIST'} | Wave: ${isWaving}`;
+            debugDiv.innerHTML = `
+            Emotion: ${emotion.toUpperCase()}
+            (BrowDist: ${browDistText}) <br>
+            Baseline: ${baselineBrowDist ? baselineBrowDist.toFixed(4) : "-"} |
+            AngryLine: ${baselineBrowDist ? (baselineBrowDist * ANGRY_RATIO).toFixed(4) : "-"} <br> 
+            EyeOpen: ${eyeOpenText} |
+            Baseline Eye: ${baselineEyeOpen ? baselineEyeOpen.toFixed(4) : "-"} |
+            EyesWide: ${isEyesWide} <br>
+            Hand: ${isOpen ? 'OPEN' : 'FIST'} | Wave: ${isWaving} |
+            Wave: ${isWaving} |
+            StrongNod: ${isStrongNod}
+            `;
         }
 
         // 4. UI 렌더링
-        if (now < holdUntil) {
+        if (isCalibrating) {
+            outputDiv.innerText = "표정 기준 측정 중...";
+            outputDiv.style.borderColor = "#ffffff";
+            outputDiv.style.color = "white";
+        } else if (now < holdUntil) {
             outputDiv.innerText = currentActionText;
             outputDiv.style.borderColor = currentBorderColor;
             outputDiv.style.color = currentBorderColor;
